@@ -9,7 +9,7 @@ import re, json
 
 
 class Alignment(object):
-    def __init__(self, nullprob = 0.1, dirT = 0.001, lamb = 4.0): # (1) nullAlignment (2) dirT (3) dirQ
+    def __init__(self, nullprob = 0.1, dirT = 0.001, lamb = 10.0): # (1) nullAlignment (2) dirT (3) dirQ
         #
         self.url_e = 'data//corpus.en'
         self.url_f = 'data//corpus.es'
@@ -20,7 +20,7 @@ class Alignment(object):
         self.url_dev_gold = 'data//dev.key'
 
         
-        self.iterations = 10
+        self.iterations = 30
         self.iter = 0
         self.infinitesimal = 0.0000001
         
@@ -71,7 +71,7 @@ class Alignment(object):
         self.t = collections.defaultdict(lambda:self.infinitesimal) #translation probability
         
         
-        print "MODEL:"+ 'NullAligenment:' +str(self.nullprob)+ '  dirT:' +str(self.dirT)+ '  dirQ:' +str(self.lamb)
+        print "MODEL:"+ 'NullAligenment:' +str(self.nullprob)+ '  dirT:' +str(self.dirT)+ '  Lambda:' +str(self.lamb)
 
 
     def Inputcorpus(self):
@@ -120,6 +120,10 @@ class Alignment(object):
     
     def GetZ(self,i,l,m,lamb):
         return ComputeZ(i+1,l,m,lamb)
+    
+    def GetLogZ(self,i, l, m, lamb):
+        return ComputeDLogZ(i+1,l,m,lamb)
+        
         
     def GetDelta(self,s,i,j):
         return self.delta[(s,i,j)]
@@ -146,28 +150,34 @@ class Alignment(object):
             self.t[(idx_f,idx_e)] = ( self.GetCount_fe(idx_f,idx_e) + self.dirT ) / ( self.GetCount_e(idx_e) + self.dirT*len(self.wordmap_f) )  # dirT
             
     def ComputeLamb(self):
-
-        for ii in xrange(0,8):
+        for ii in xrange(0,20):
             self.mod_feat = 0
             for s in xrange(0,self.sum_s):
                 m = self.lengths_f[s]
                 l = self.lengths_e[s]
                 for i in xrange(0,m):
-                    self.mod_feat += l * ComputeDLogZ(i, m, l, self.lamb)
-            self.mod_feat /= len(self.wordmap_f)
-
-            self.lamb += (self.emp_feat - self.mod_feat) * 20.0;
+                    if l==0:
+                        continue
+                    else:
+                        self.mod_feat +=  self.GetLogZ(i, l, m, self.lamb)  # null aligned words
+                    
+            #self.mod_feat /= len(self.wordmap_f)
+            #self.emp_feat /= len(self.wordmap_f)
+            delta = (self.emp_feat - self.normprob*self.mod_feat) * 20.0/len(self.wordmap_f)
+            print 'Delata: '+ str(delta)
+            self.lamb += delta
             if self.lamb <= 0.1:
                 self.lamb = 0.1
-            if self.lamb > 14:
-                self.lamb = 14
+            if self.lamb > 150:
+                self.lamb = 150
                 
             print 'Lambda: '+str(self.lamb)
-            
+           
     def UpdateCounts(self):
         self.count_e.clear()
         self.count_fe.clear() # define a new counts in every iteration
         #------------------------ComputeDelta-------------------------------------
+        self.emp_feat = 0
         for s in xrange(0,self.sum_s):
             #if s%1000 == 0:
             #    print "E-step - ComputeDelta - Sentence:"+str(s)
@@ -184,24 +194,28 @@ class Alignment(object):
                     prob.append(self.GetT(self.sentences_f[s][i],self.sentences_e[s][j])*self.GetQ(j,i,l,m,z)*self.normprob)
                     normalization += prob[j]
                 prob.append(self.GetT(self.sentences_f[s][i],-1)*self.nullprob)
+                norm_noNA = normalization
                 normalization += prob[l]
                 # Print alignments
                 for j in xrange(0,l):
                     self.delta[(s,i,j)] = prob[j]/normalization
+                    
+                    #self.emp_feat += prob[j]/norm_noNA*Feature(i+1,j+1,l,m)
+                    
                 #nullAlignment
                 self.delta[(s,i,-1)] = prob[l]/normalization
-                
-                #self.emp_feat +=
-                
          #---------------------------------------UpdateCounts---------------------------------------
                 for j in xrange(0,l):
                     # Count C(e,f)
                     self.count_fe[(self.sentences_f[s][i],self.sentences_e[s][j])] += self.GetDelta(s,i,j)
                     # Count C(e)
                     self.count_e[self.sentences_e[s][j]] += self.GetDelta(s,i,j)
+                    
+                    self.emp_feat += self.GetDelta(s,i,j)*Feature(i+1,j+1,l,m)
                 # nullAlignment
                 self.count_fe[(self.sentences_f[s][i],-1)] += self.GetDelta(s,i,-1)
                 self.count_e[-1] += self.GetDelta(s,i,-1)
+                
             
     def UpdateCounts_IBM1(self):
         self.count_e.clear()
@@ -328,8 +342,6 @@ def UnnormalizedProb(i,j,l,m,lamb):         # There're some restrictions of call
 
 #@staticmethod
 def ComputeZ(i,l,m,lamb):
-    if m==0 or l==0:
-        return 1
     split = float(i) * l / m
     floor = int(split)
     ceil = floor + 1
@@ -345,11 +357,12 @@ def ComputeZ(i,l,m,lamb):
 
 #@staticmethod
 def ComputeDLogZ(i,l,m,lamb):
-    z = ComputeZ(i,l,m,lamb);
+    z = ComputeZ(i,l,m,lamb)
     split = float(i) * l / m
     floor = int(split)
     ceil = floor + 1
     ratio = math.exp(-lamb / l)
+    d = -1.0 / l
     num_top = l - floor
     pct = 0
     pcb = 0
@@ -359,7 +372,12 @@ def ComputeDLogZ(i,l,m,lamb):
         pcb = arithmetico_geometric_series(Feature(i, floor, l, m), UnnormalizedProb(i, floor, l, m, lamb), ratio, d, floor)
     return (pct + pcb) / z
 #@staticmethod        
-def arithmetico_geometric_series(a_1, g_1,r, d, n):
+def arithmetico_geometric_series(a_1, g_1, r, d, n):
+    g_np1 = g_1 * math.pow(r, n)
+    a_n = d * (n - 1) + a_1
+    x_1 = a_1 * g_1
+    g_2 = g_1 * r
+    rm1 = r - 1
     return (a_n * g_np1 - x_1) / rm1 - d*(g_np1 - g_2) / (rm1 * rm1)
     
 def runfastAlignment(arg):
@@ -378,7 +396,7 @@ def runfastAlignment(arg):
 
 if __name__ == "__main__":
     #main(sys.argv[1:]) # 0.08 0.001 0.1
-    arg = [0.08,0.001,4]
+    arg = [0.08,0.001,10]
     print runfastAlignment(arg)
                
                 
